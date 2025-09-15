@@ -292,7 +292,6 @@ def train_coconut_model(model_path, data_path, save_path, epochs=5, batch_size=3
             'latent_token_id': model.latent_token_id,
             'start_latent_id': model.start_latent_id,
             'end_latent_id': model.end_latent_id,
-            'eos_token_id': model.eos_token_id,
             'final_accuracy': final_acc,
             'training_mode': 'coconut'
         }

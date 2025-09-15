@@ -11,8 +11,10 @@ The COCONUT (Continuous Chain-of-Thought) paradigm allows models to perform reas
 - `train_mnist_simple.py` - Baseline Vision Transformer implementation and training
 - `mnist_coconut.py` - COCONUT architecture adapted for MNIST classification
 - `train_mnist_coconut.py` - Training script for COCONUT model with comparison capabilities
+- `visualize_coconut_reasoning.py` - Visualization tool for COCONUT reasoning trajectories
 - `data/` - Directory for MNIST dataset files
 - `mnist_attention_checkpoint/` - Saved baseline Vision Transformer model
+- `mnist_coconut_checkpoint/` - Saved trained COCONUT model
 
 ## Features
 
@@ -61,15 +63,25 @@ python train_mnist_coconut.py --model_path mnist_attention_checkpoint --data_pat
 ### 4. Test COCONUT Model
 
 ```python
-from mnist_coconut import create_mnist_coconut_from_pretrained
+from mnist_coconut import load_trained_coconut_model
 import torch
 
-# Load trained model
-model, config = create_mnist_coconut_from_pretrained("mnist_coconut_checkpoint")
+# Load trained COCONUT model
+model, config = load_trained_coconut_model("mnist_coconut_checkpoint")
 
 # Generate predictions with reasoning
 images = torch.randn(1, 1, 28, 28)  # Dummy image
 predictions, reasoning_logits = model.generate(images, max_reasoning_steps=10)
+```
+
+### 5. Visualize COCONUT Reasoning
+
+```bash
+# Visualize reasoning trajectories with ground truth density regions
+python visualize_coconut_reasoning.py --model_path mnist_coconut_checkpoint --num_images 30
+
+# Use PCA or t-SNE for dimensionality reduction
+python visualize_coconut_reasoning.py --reduction_method tsne --num_images 50
 ```
 
 ## Arguments
@@ -92,6 +104,15 @@ predictions, reasoning_logits = model.generate(images, max_reasoning_steps=10)
 - `--use_coconut`: Use COCONUT reasoning (default: True)
 - `--use_regular`: Use regular training instead of COCONUT
 
+### visualize_coconut_reasoning.py
+- `--model_path`: Path to trained COCONUT model (default: "mnist_coconut_checkpoint")
+- `--data_path`: Path to MNIST data (default: "data")
+- `--num_images`: Number of images to analyze (default: 10)
+- `--max_reasoning_steps`: Max coconut reasoning steps (default: 10)
+- `--reduction_method`: Dimensionality reduction method - 'pca' or 'tsne' (default: 'pca')
+- `--seed`: Random seed for reproducibility (default: 42)
+- `--save_path`: Output plot path (default: "coconut_reasoning.png")
+
 ## Key Differences: Standard vs COCONUT
 
 | Feature | Standard ViT | COCONUT ViT |
@@ -106,6 +127,9 @@ predictions, reasoning_logits = model.generate(images, max_reasoning_steps=10)
 
 - PyTorch
 - NumPy
+- matplotlib (for visualization)
+- scikit-learn (for PCA and t-SNE)
+- scipy (for kernel density estimation)
 - tqdm (for progress bars)
 - Standard Python libraries (os, struct, argparse)
 
@@ -126,3 +150,31 @@ predictions, reasoning_logits = model.generate(images, max_reasoning_steps=10)
 ## Experimental Results
 
 The COCONUT model demonstrates the ability to perform multi-step reasoning for MNIST classification, providing interpretable reasoning steps while maintaining competitive accuracy with the baseline Vision Transformer.
+
+## Visualization Features
+
+The `visualize_coconut_reasoning.py` script provides powerful insights into the COCONUT reasoning process:
+
+### Reasoning Trajectory Visualization
+- **2D Embedding Space**: Uses PCA or t-SNE to project high-dimensional reasoning states to 2D
+- **Step-by-Step Progression**: Shows how reasoning evolves from initial image embeddings to final predictions
+- **Ground Truth Density Regions**: Displays where correctly classified examples typically converge for each digit class
+- **Hit vs Miss Analysis**: Distinguishes successful reasoning paths (solid lines) from failures (dotted lines)
+
+### Key Visualization Elements
+- **Colored Density Regions**: Each digit (0-9) has its own colored convergence zone based on correct predictions
+- **Reasoning Trajectories**: Lines showing the autoregressive reasoning path from start to finish
+- **Digit Labels**: Clear numerical labels marking the center of each ground truth region
+- **Start/End Markers**: Circles mark reasoning start points, stars mark successful endpoints
+
+### Interpretability Benefits
+- **Continuous Reasoning Analysis**: Observe how latent thoughts evolve without tokenization bottlenecks
+- **Convergence Patterns**: See which reasoning paths lead to correct vs incorrect predictions
+- **Spatial Organization**: Understand how the model organizes different digit concepts in embedding space
+- **Reasoning Quality**: Assess whether reasoning trajectories align with expected ground truth regions
+
+This visualization framework enables researchers to gain deep insights into how COCONUT models perform continuous reasoning and make predictions in latent space.
+
+![COCONUT Reasoning Trajectories](coconut_reasoning.png)
+
+*Example visualization showing COCONUT's autoregressive reasoning trajectories in 2D embedding space. Each colored region represents where correctly classified examples of each digit typically converge, while the trajectories show the step-by-step reasoning process from initial embeddings to final predictions.*

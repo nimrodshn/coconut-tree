@@ -88,31 +88,48 @@ class MNISTCoconut(nn.Module):
         
         max_n_latents = max([len(l) for l in latent_lists]) if latent_lists else 0
         
-        # Continuous autoregressive reasoning loop
+        # Initialize growing reasoning sequence with start token
+        growing_reasoning_embeds = self._get_sequence_embeddings(
+            reasoning_sequence[:, :1], image_embeds[:, 0]  # Only start token initially
+        )
+
+        # Continuous autoregressive reasoning loop - GROWING sequence
         for reasoning_step in range(max_n_latents + 1):
-            # Create combined input: image patches + current reasoning sequence
-            combined_input = torch.cat([image_embeds, current_sequence_embeds], dim=1)
-            
-            # Apply positional embeddings
+            # Create combined input: image patches + GROWING reasoning sequence
+            combined_input = torch.cat([image_embeds, growing_reasoning_embeds], dim=1)
+
+            # Apply positional embeddings for current sequence length
             extended_pos_embed = self._get_extended_positional_embeddings(combined_input.shape[1])
             combined_input = combined_input + extended_pos_embed
             combined_input = self.base_vision_model.dropout(combined_input)
-            
+
             # Forward through base model transformer blocks
             x = combined_input
             for block in self.base_vision_model.blocks:
                 x = block(x)
             x = self.base_vision_model.norm(x)
-            
+
             # Extract reasoning sequence hidden states (continuous thoughts!)
-            reasoning_hidden_states = x[:, image_embeds.shape[1]:, :]  # (batch, seq_len, embed_dim)
-            
-            # CONTINUOUS REASONING: Use hidden states directly as next embeddings
-            # No tokenization bottleneck - pure latent space reasoning!
+            reasoning_hidden_states = x[:, image_embeds.shape[1]:, :]  # (batch, current_reasoning_len, embed_dim)
+
+            # GROWING AUTOREGRESSIVE: Add next reasoning token to sequence
             if reasoning_step < max_n_latents:
-                current_sequence_embeds = self._update_latent_thoughts_continuous(
-                    current_sequence_embeds, reasoning_hidden_states, latent_lists, reasoning_step
+                # Get the next latent token embedding
+                next_token_pos = reasoning_step + 1  # +1 because we started with start token
+                if next_token_pos < reasoning_sequence.shape[1]:
+                    next_token_embeds = self._get_sequence_embeddings(
+                        reasoning_sequence[:, next_token_pos:next_token_pos+1],
+                        reasoning_hidden_states[:, -1, :]  # Use last hidden state as context
+                    )
+
+                    # GROW the sequence by appending next token
+                    growing_reasoning_embeds = torch.cat([growing_reasoning_embeds, next_token_embeds], dim=1)
+            else:
+                # Final step: add end token
+                end_token_embeds = self._get_sequence_embeddings(
+                    reasoning_sequence[:, -1:], image_embeds[:, 0]  # End token
                 )
+                growing_reasoning_embeds = torch.cat([growing_reasoning_embeds, end_token_embeds], dim=1)
         
         # Generate final logits from the last reasoning step
         final_logits = self.base_vision_model.head(reasoning_hidden_states)  # (batch, seq_len, num_classes)
@@ -174,78 +191,100 @@ class MNISTCoconut(nn.Module):
         # Base model's positional embeddings
         base_pos_embed = self.base_vision_model.pos_embed  # (1, num_patches+1, embed_dim)
         base_length = base_pos_embed.shape[1]
-        
+
         if total_length <= base_length:
             return base_pos_embed[:, :total_length, :]
-        
+
         # Need to extend for reasoning tokens
         extra_length = total_length - base_length
-        # Use learnable embeddings for reasoning positions
+
+        # Create or extend reasoning positional embeddings dynamically
         if not hasattr(self, 'reasoning_pos_embed'):
             self.reasoning_pos_embed = nn.Parameter(
-                torch.zeros(1, extra_length, self.embed_dim)
+                torch.zeros(1, extra_length, self.embed_dim, device=base_pos_embed.device)
             )
             # Initialize with small random values
             nn.init.normal_(self.reasoning_pos_embed, std=0.02)
-        
-        extended_pos_embed = torch.cat([base_pos_embed, self.reasoning_pos_embed], dim=1)
-        return extended_pos_embed[:, :total_length, :]
+        elif self.reasoning_pos_embed.shape[1] < extra_length:
+            # Need to extend existing reasoning embeddings
+            current_extra = self.reasoning_pos_embed.shape[1]
+            additional_length = extra_length - current_extra
+            additional_embeds = nn.Parameter(
+                torch.zeros(1, additional_length, self.embed_dim, device=base_pos_embed.device)
+            )
+            nn.init.normal_(additional_embeds, std=0.02)
+            self.reasoning_pos_embed = nn.Parameter(
+                torch.cat([self.reasoning_pos_embed, additional_embeds], dim=1)
+            )
+
+        # Take only what we need for current sequence length
+        reasoning_embeds_needed = self.reasoning_pos_embed[:, :extra_length, :]
+        extended_pos_embed = torch.cat([base_pos_embed, reasoning_embeds_needed], dim=1)
+        return extended_pos_embed
     
-    def _update_latent_thoughts_continuous(self, sequence_embeds, hidden_states, latent_lists, pass_idx):
-        """CONTINUOUS REASONING: Update latent embeddings directly with hidden states"""
-        # Create updated embeddings
-        updated_embeds = sequence_embeds.clone()
-        
-        for batch_idx, latent_positions in enumerate(latent_lists):
-            if pass_idx < len(latent_positions):
-                pos = latent_positions[pass_idx]
-                
-                # CONTINUOUS LATENT REASONING:
-                # Use the hidden state directly as the next embedding!
-                # No tokenization → embedding bottleneck
-                current_thought = hidden_states[batch_idx, pos]  # (embed_dim,) - pure continuous thought
-                
-                # Optional: Apply lightweight transformation to help learning
-                # But keep it minimal to preserve continuous nature
-                if hasattr(self, 'latent_update') and self.latent_update is not None:
-                    refined_thought = self.latent_update(current_thought)
-                    # Use residual connection for stability  
-                    updated_embeds[batch_idx, pos] = current_thought + refined_thought
-                else:
-                    # Pure continuous reasoning - hidden state becomes next embedding directly
-                    updated_embeds[batch_idx, pos] = current_thought
-        
-        return updated_embeds
     
-    def generate(self, images, max_reasoning_steps=30):
-        """Generate reasoning sequence for given images"""
+    def generate(self, images, max_reasoning_steps=6):
+        """Generate reasoning sequence for given images using growing autoregressive approach"""
         batch_size = images.shape[0]
         device = images.device
-        
-        # Create initial reasoning sequence with latent tokens
-        initial_sequence = []
-        
-        # Add start token
-        initial_sequence.append(self.start_latent_id)
-        
-        # Add latent tokens for reasoning
-        for _ in range(max_reasoning_steps):
-            initial_sequence.append(self.latent_token_id)
-        
-        # Add end token
-        initial_sequence.append(self.end_latent_id)
-        
-        # Convert to tensor
-        reasoning_sequence = torch.tensor([initial_sequence] * batch_size, device=device)
-        
-        # Forward pass
-        output = self.forward(images, reasoning_sequence=reasoning_sequence)
-        
-        # Return final classification
-        final_logits = output.logits[:, -1, :]  # Last position logits
+
+        # For the growing sequence approach, we need to simulate the process
+        # without actually calling forward with a full reasoning sequence
+
+        # Get image embeddings
+        image_embeds = self._get_image_embeddings(images)
+
+        # Initialize with start token only
+        start_sequence = torch.tensor([[self.start_latent_id]] * batch_size, device=device)
+        growing_reasoning_embeds = self._get_sequence_embeddings(start_sequence, image_embeds[:, 0])
+
+        all_logits = []
+
+        # Growing autoregressive generation
+        for step in range(max_reasoning_steps + 1):
+            # Create combined input: image + current growing sequence
+            combined_input = torch.cat([image_embeds, growing_reasoning_embeds], dim=1)
+
+            # Apply positional embeddings
+            extended_pos_embed = self._get_extended_positional_embeddings(combined_input.shape[1])
+            combined_input = combined_input + extended_pos_embed
+            combined_input = self.base_vision_model.dropout(combined_input)
+
+            # Forward through transformer
+            x = combined_input
+            for block in self.base_vision_model.blocks:
+                x = block(x)
+            x = self.base_vision_model.norm(x)
+
+            # Get reasoning hidden states
+            reasoning_hidden_states = x[:, image_embeds.shape[1]:, :]
+
+            # Generate logits for current sequence
+            step_logits = self.base_vision_model.head(reasoning_hidden_states)
+            all_logits.append(step_logits)
+
+            # Add next token to growing sequence
+            if step < max_reasoning_steps:
+                # Add latent token
+                next_token_sequence = torch.tensor([[self.latent_token_id]] * batch_size, device=device)
+                next_token_embeds = self._get_sequence_embeddings(
+                    next_token_sequence, reasoning_hidden_states[:, -1, :]
+                )
+                growing_reasoning_embeds = torch.cat([growing_reasoning_embeds, next_token_embeds], dim=1)
+            else:
+                # Add end token
+                end_token_sequence = torch.tensor([[self.end_latent_id]] * batch_size, device=device)
+                end_token_embeds = self._get_sequence_embeddings(
+                    end_token_sequence, image_embeds[:, 0]
+                )
+                growing_reasoning_embeds = torch.cat([growing_reasoning_embeds, end_token_embeds], dim=1)
+
+        # Use final step's logits for prediction
+        final_logits = all_logits[-1][:, -1, :]  # Last position of final step
         predicted_classes = torch.argmax(final_logits, dim=1)
-        
-        return predicted_classes, output.logits
+
+        # Return predictions and final step logits
+        return predicted_classes, final_logits
     
     def train(self, mode=True):
         self.base_vision_model.train(mode)
@@ -295,6 +334,51 @@ def create_mnist_coconut_from_pretrained(model_path, device='cpu', num_reasoning
     
     coconut_model.to(device)
     return coconut_model, model_config
+
+
+def load_trained_coconut_model(model_path, device='cpu'):
+    """Load a fully trained MNIST Coconut model from coconut checkpoint"""
+    import os
+
+    # Load coconut configuration
+    config_path = os.path.join(model_path, "coconut_config.pth")
+    coconut_config = torch.load(config_path, map_location=device)
+
+    # Extract base model config
+    base_config = coconut_config['base_config']
+
+    # Create base vision model
+    base_model = VisionTransformer(
+        img_size=base_config['img_size'],
+        patch_size=base_config['patch_size'],
+        num_classes=base_config['num_classes'],
+        embed_dim=base_config['embed_dim'],
+        num_layers=base_config['num_layers'],
+        num_heads=base_config['num_heads']
+    )
+
+    # Create Coconut model with saved token IDs
+    coconut_model = MNISTCoconut(
+        base_vision_model=base_model,
+        latent_token_id=coconut_config['latent_token_id'],
+        start_latent_id=coconut_config['start_latent_id'],
+        end_latent_id=coconut_config['end_latent_id']
+    )
+
+    # Load trained coconut weights
+    model_weights_path = os.path.join(model_path, "mnist_coconut_model.pth")
+    state_dict = torch.load(model_weights_path, map_location=device)
+
+    # Load with strict=False to handle potential model architecture mismatches
+    missing_keys, unexpected_keys = coconut_model.load_state_dict(state_dict, strict=False)
+    if missing_keys:
+        print(f"Warning: Missing keys in model: {missing_keys}")
+    if unexpected_keys:
+        print(f"Warning: Unexpected keys in checkpoint: {unexpected_keys}")
+
+    coconut_model.to(device)
+
+    return coconut_model, coconut_config
 
 
 if __name__ == "__main__":

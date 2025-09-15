@@ -139,7 +139,7 @@ class VisionTransformer(nn.Module):
         
         # Add class token
         cls_tokens = self.cls_token.expand(batch_size, -1, -1)
-        x = torch.cat([cls_tokens, x], dim=1)  # (batch_size, num_patches + 1, embed_dim)
+        x = torch.cat([cls_tokens, x], dim=1)  # (batch_size, num_patches + 1 for *class-token* which will eventually, embed_dim)
         
         # Add positional embeddings
         x = x + self.pos_embed
